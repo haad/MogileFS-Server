@@ -13,6 +13,8 @@ use MogileFS::Rebalance;
 use MogileFS::Config;
 use MogileFS::Server;
 
+use Sys::Syslog ();
+
 sub new {
     my ($class, $psock) = @_;
     my $self = fields::new($class);
@@ -51,6 +53,9 @@ sub work {
     vec($rin, fileno($psock), 1) = 1;
     my $buf;
 
+    Sys::Syslog::openlog('mogilefsd-query', 'pid', 'daemon');
+    Sys::Syslog::syslog('info', 'Beginning run query worker');
+
     while (1) {
         my $rout;
         unless (select($rout=$rin, undef, undef, 5.0)) {
@@ -59,16 +64,20 @@ sub work {
         }
 
         my $newread;
-        my $rv = sysread($psock, $newread, 1024);
+        my $rv = sysread($psock, $newread, 1536);
         if (!$rv) {
             if (defined $rv) {
+                Sys::Syslog::closelog();
                 die "While reading pipe from parent, got EOF.  Parent's gone.  Quitting.\n";
             } else {
+                Sys::Syslog::closelog();
                 die "Error reading pipe from parent: $!\n";
             }
         }
         $buf .= $newread;
-
+	#added for debuging
+	Sys::Syslog::syslog('info', 'Command %s',$buf);
+	#
         while ($buf =~ s/^(.+?)\r?\n//) {
             my $line = $1;
             if ($self->process_generic_command(\$line)) {
@@ -76,6 +85,7 @@ sub work {
             } else {
                 $self->validate_dbh;
                 $self->process_line(\$line);
+
             }
         }
     }
@@ -346,12 +356,6 @@ sub sort_devs_by_freespace {
     return @list;
 }
 
-sub valid_key {
-    my ($key) = @_;
-
-    return defined($key) && length($key);
-}
-
 sub cmd_create_close {
     my MogileFS::Worker::Query $self = shift;
     my $args = shift;
@@ -370,6 +374,8 @@ sub cmd_create_close {
     my $devid = $args->{devid}  or return $self->err_line("no_devid");
     my $path  = $args->{path}   or return $self->err_line("no_path");
     my $checksum = $args->{checksum};
+
+    Sys::Syslog::syslog('info', "Running cmd_create_close dmid=%d, key=%s, fidid=%d, devid=%d, path=%s.", $dmid, $key, $fidid, $devid, $path);
 
     if ($checksum) {
         $checksum = eval { MogileFS::Checksum->from_string($fidid, $checksum) };
@@ -394,6 +400,7 @@ sub cmd_create_close {
 
     # Protect against leaving orphaned uploads.
     my $failed = sub {
+	Sys::Syslog::syslog('info',"Failed routine called,");
         $dfid->add_to_db;
         $fid->delete;
     };
@@ -405,9 +412,10 @@ sub cmd_create_close {
 
     # if a temp file is closed without a provided-key, that means to
     # delete it.
-    unless (valid_key($key)) {
+    unless (defined $key && length($key)) {
         $failed->();
-        return $self->ok_line;
+        Sys::Syslog::syslog('info', "Deleting Temp File key=%s", $key);
+	return $self->ok_line;
     }
 
     # get size of file and verify that it matches what we were given, if anything
@@ -421,11 +429,15 @@ sub cmd_create_close {
         my $type    = defined $size ? "missing" : "cantreach";
         my $lasterr = MogileFS::Util::last_error();
         $failed->();
+        Sys::Syslog::syslog('info', 'File Upload Size verification error expected size %d, actual 0 (%s), path=%s, error: %d.',
+                            $args->{size}, $type, $path, $lasterr);
         return $self->err_line("size_verify_error", "Expected: $args->{size}; actual: 0 ($type); path: $path; error: $lasterr")
     }
 
     if ($args->{size} > -1 && ($args->{size} != $size)) {
         $failed->();
+        Sys::Syslog::syslog('info', 'File Upload Size verification error expected size %d, actual %d, path=%s.',
+                            $args->{size}, $size, $path);
         return $self->err_line("size_mismatch", "Expected: $args->{size}; actual: $size; path: $path")
     }
 
@@ -446,11 +458,12 @@ sub cmd_create_close {
     # see if we have a fid for this key already
     my $old_fid = MogileFS::FID->new_from_dmid_and_key($dmid, $key);
     if ($old_fid) {
+        Sys::Syslog::syslog('info', 'Found duplicit fids for key=%s, dmid=%d, old_fid=%d, fidid=%d.', $key, $dmid, $old_fid, $fidid);
         # Fail if a file already exists for this fid.  Should never
         # happen, as it should not be possible to close a file twice.
         return $self->err_line("fid_exists")
             unless $old_fid->{fidid} != $fidid;
-
+        Sys::Syslog::syslog('info', 'Deleting file.');
         $old_fid->delete;
     }
 
@@ -491,18 +504,12 @@ sub cmd_updateclass {
     $args->{dmid} = $self->check_domain($args)
         or return $self->err_line('domain_not_found');
 
-    # call out to a hook that might modify the arguments for us, abort if it tells us to
-    my $rv = MogileFS::run_global_hook('cmd_updateclass', $args);
-    return $self->err_line('plugin_aborted') if defined $rv && ! $rv;
-
     my $dmid  = $args->{dmid};
-    my $key   = $args->{key};
-    valid_key($key) or return $self->err_line("no_key");
+    my $key   = $args->{key}        or return $self->err_line("no_key");
     my $class = $args->{class}      or return $self->err_line("no_class");
 
-    my $classobj = Mgd::class_factory()->get_by_name($dmid, $class)
+    my $classid = eval { Mgd::class_factory()->get_by_name($dmid, $class)->id }
         or return $self->err_line('class_not_found');
-    my $classid = $classobj->id;
 
     my $fid = MogileFS::FID->new_from_dmid_and_key($dmid, $key)
         or return $self->err_line('invalid_key');
@@ -533,9 +540,7 @@ sub cmd_delete {
 
     # validate parameters
     my $dmid = $args->{dmid};
-    my $key = $args->{key};
-
-    valid_key($key) or return $self->err_line("no_key");
+    my $key = $args->{key} or return $self->err_line("no_key");
 
     # is this fid still owned by this key?
     my $fid = MogileFS::FID->new_from_dmid_and_key($dmid, $key)
@@ -565,7 +570,7 @@ sub cmd_file_debug {
         # If not, require dmid/dkey and pick up the fid from there.
         $args->{dmid} = $self->check_domain($args)
             or return $self->err_line('domain_not_found');
-        return $self->err_line("no_key") unless valid_key($args->{key});
+        return $self->err_line("no_key") unless $args->{key};
         
         # now invoke the plugin, abort if it tells us to
         my $rv = MogileFS::run_global_hook('cmd_file_debug', $args);
@@ -639,9 +644,7 @@ sub cmd_file_info {
 
     # validate parameters
     my $dmid = $args->{dmid};
-    my $key = $args->{key};
-
-    valid_key($key) or return $self->err_line("no_key");
+    my $key = $args->{key} or return $self->err_line("no_key");
 
     my $fid;
     Mgd::get_store()->slaves_ok(sub {
@@ -761,9 +764,7 @@ sub cmd_rename {
     my $dmid = $self->check_domain($args)
         or return $self->err_line('domain_not_found');
     my ($fkey, $tkey) = ($args->{from_key}, $args->{to_key});
-    unless (valid_key($fkey) && valid_key($tkey)) {
-        return $self->err_line("no_key");
-    }
+    return $self->err_line("no_key") unless $fkey && $tkey;
 
     my $fid = MogileFS::FID->new_from_dmid_and_key($dmid, $fkey)
         or return  $self->err_line("unknown_key");
@@ -1080,7 +1081,7 @@ sub cmd_get_paths {
 
     # memcache mappings are as follows:
     #  mogfid:<dmid>:<dkey> -> fidid
-    #  mogdevids:<fidid>    -> \@devids  (and TODO: invalidate when deletion is run!)
+    #  mogdevids:<fidid>    -> \@devids  (and TODO: invalidate when the replication or deletion is run!)
 
     # if you specify 'noverify', that means a correct answer isn't needed and memcache can
     # be used.
@@ -1099,9 +1100,7 @@ sub cmd_get_paths {
 
     # validate parameters
     my $dmid = $args->{dmid};
-    my $key = $args->{key};
-
-    valid_key($key) or return $self->err_line("no_key");
+    my $key = $args->{key} or return $self->err_line("no_key");
 
     # We default to returning two possible paths.
     # but the client may ask for more if they want.
@@ -1163,18 +1162,18 @@ sub cmd_get_paths {
     # keep one partially-bogus path around just in case we have nothing else to send.
     my $backup_path;
 
-    # files on devices set for drain may disappear soon.
-    my @drain_paths;
-
     # construct result paths
     foreach my $dev (@sorted_devs) {
-        next unless $dev && $dev->host;
+        next unless $dev && ($dev->can_read_from);
 
+        my $host = $dev->host;
+        next unless $dev && $host;
         my $dfid = MogileFS::DevFID->new($dev, $fid);
         my $path = $dfid->get_url;
-        my $currently_up = $dev->should_read_from;
+        my $currently_down =
+            $host->observed_unreachable || $dev->observed_unreachable;
 
-        if (! $currently_up) {
+        if ($currently_down) {
             $backup_path = $path;
             next;
         }
@@ -1185,24 +1184,9 @@ sub cmd_get_paths {
             $args->{noverify}    ||
             $dfid->size_matches;
 
-        if ($dev->dstate->should_drain) {
-            push @drain_paths, $path;
-            next;
-        }
-
         my $n = ++$ret->{paths};
         $ret->{"path$n"} = $path;
         last if $n == $pathcount;   # one verified, one likely seems enough for now.  time will tell.
-    }
-
-    # deprioritize devices set for drain, they could disappear soon...
-    # Clients /should/ try to use lower-numbered paths first to avoid this.
-    if ($ret->{paths} < $pathcount && @drain_paths) {
-        foreach my $path (@drain_paths) {
-            my $n = ++$ret->{paths};
-            $ret->{"path$n"} = $path;
-            last if $n == $pathcount;
-        }
     }
 
     # use our backup path if all else fails
@@ -1278,9 +1262,7 @@ sub cmd_edit_file {
 
     # validate parameters
     my $dmid = $args->{dmid};
-    my $key = $args->{key};
-
-    valid_key($key) or return $self->err_line("no_key");
+    my $key = $args->{key} or return $self->err_line("no_key");
 
     # get DB handle
     my $fid;
@@ -1346,8 +1328,12 @@ sub cmd_edit_file {
     @list = grep {
         my $devid = $_;
         my $dev = $dmap->{$devid};
+        my $host = $dev ? $dev->host : undef;
 
-        $dev && $dev->should_read_from;
+        $dev
+        && $host
+        && $dev->can_read_from
+        && !($host->observed_unreachable || $dev->observed_unreachable);
     } @list;
 
     # Take first remaining device from list
@@ -1805,9 +1791,6 @@ sub err_line {
     if ($self->{querystarttime}) {
         $delay = sprintf("%.4f ", Time::HiRes::tv_interval($self->{querystarttime}));
         $self->{querystarttime} = undef;
-    } else {
-        # don't send another ERR line if we already sent one
-        return 0;
     }
 
     my $id = defined $self->{reqid} ? "$self->{reqid} " : '';
