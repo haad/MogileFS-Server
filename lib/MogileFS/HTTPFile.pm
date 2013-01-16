@@ -27,6 +27,8 @@ sub at {
     $self->{host} = $1;
     $self->{port} = $2;
     $self->{uri}  = $3;
+
+    Mgd:log('info', 'HTTPFile at() routine url: %s, host: %s, port: %d, uri: %s\n', $url, $1, $2, $3);
     return $self;
 }
 
@@ -103,6 +105,9 @@ sub size {
 
     my ($host, $port, $uri, $path) = map { $self->{$_} } qw(host port uri url);
 
+    Mgd:log('info', 'HTTPFile size routine running: host: %s, port: %d, uri: %s, path: %s', $host, $port, $uri, $path);
+    Mgd:log('info', 'HTTPFile $size_check_retry_after{$host} => %d, host: %s', $size_check_retry_after{$host}, $host);
+
     return undef if (exists $size_check_retry_after{$host}
         && $size_check_retry_after{$host} > Time::HiRes::time());
 
@@ -110,6 +115,7 @@ sub size {
     # Hardcoded connection cache size of 20 :(
     $user_agent ||= LWP::UserAgent->new(timeout => $node_timeout, keep_alive => 20);
     my $res = $user_agent->head($path);
+    Mgd:log('info', 'HTTPFile size $user_agent->head($path), res->code = %d, res->message = %s, res->header = %s', $res->code, $res->message, $res->header);
     if ($res->is_success) {
         delete $size_check_failcount{$host} if exists $size_check_failcount{$host};
         my $size = $res->header('content-length');
@@ -124,18 +130,21 @@ sub size {
         return $size;
     } else {
         if ($res->code == 404) {
+            Mgd:log('info', 'HTTPFile size received res->code: %d', $res->code);
             delete $size_check_failcount{$host} if exists $size_check_failcount{$host};
             return FILE_MISSING;
         }
         if ($res->message =~ m/connect:/) {
+            Mgd:log('info', 'HTTPFile size received message res->message: %s', $res->message);
             my $count = $size_check_failcount{$host};
             $count ||= 1;
             $count *= 2 unless $count > 360;
             $size_check_retry_after{$host} = Time::HiRes::time() + $count;
             $size_check_failcount{$host}   = $count;
+            Mgd:log('info', 'HTTPFile size seeting $size_check_retry_after{$host} => %d', $size_check_retry_after{$host});
         }
         return undeferr("Failed HEAD check for $path (" . $res->code . "): "
-            . $res->message); 
+            . $res->message);
     }
 }
 

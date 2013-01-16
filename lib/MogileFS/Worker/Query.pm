@@ -13,8 +13,6 @@ use MogileFS::Rebalance;
 use MogileFS::Config;
 use MogileFS::Server;
 
-use Sys::Syslog ();
-
 sub new {
     my ($class, $psock) = @_;
     my $self = fields::new($class);
@@ -53,8 +51,7 @@ sub work {
     vec($rin, fileno($psock), 1) = 1;
     my $buf;
 
-    Sys::Syslog::openlog('mogilefsd-query', 'pid', 'daemon');
-    Sys::Syslog::syslog('info', 'Beginning run query worker');
+    Mgd:log('info', 'Beginning run query worker');
 
     while (1) {
         my $rout;
@@ -76,7 +73,7 @@ sub work {
         }
         $buf .= $newread;
 	#added for debuging
-	Sys::Syslog::syslog('info', 'Command %s',$buf);
+	#Mgd:log('info', 'Command %s',$buf);
 	#
         while ($buf =~ s/^(.+?)\r?\n//) {
             my $line = $1;
@@ -375,7 +372,7 @@ sub cmd_create_close {
     my $path  = $args->{path}   or return $self->err_line("no_path");
     my $checksum = $args->{checksum};
 
-    Sys::Syslog::syslog('info', "Running cmd_create_close dmid=%d, key=%s, fidid=%d, devid=%d, path=%s.", $dmid, $key, $fidid, $devid, $path);
+    Mgd:log('info', "Running cmd_create_close dmid=%d, key=%s, fidid=%d, devid=%d, path=%s.", $dmid, $key, $fidid, $devid, $path);
 
     if ($checksum) {
         $checksum = eval { MogileFS::Checksum->from_string($fidid, $checksum) };
@@ -400,7 +397,7 @@ sub cmd_create_close {
 
     # Protect against leaving orphaned uploads.
     my $failed = sub {
-	Sys::Syslog::syslog('info',"Failed routine called,");
+	Mgd:log('info',"Failed routine called,");
         $dfid->add_to_db;
         $fid->delete;
     };
@@ -414,7 +411,7 @@ sub cmd_create_close {
     # delete it.
     unless (defined $key && length($key)) {
         $failed->();
-        Sys::Syslog::syslog('info', "Deleting Temp File key=%s", $key);
+        Mgd:log('info', "Deleting Temp File key=%s", $key);
 	return $self->ok_line;
     }
 
@@ -429,14 +426,14 @@ sub cmd_create_close {
         my $type    = defined $size ? "missing" : "cantreach";
         my $lasterr = MogileFS::Util::last_error();
         $failed->();
-        Sys::Syslog::syslog('info', 'File Upload Size verification error expected size %d, actual 0 (%s), path=%s, error: %d.',
+        Mgd:log('info', 'File Upload Size verification error expected size %d, actual 0 (%s), path=%s, error: %d.',
                             $args->{size}, $type, $path, $lasterr);
         return $self->err_line("size_verify_error", "Expected: $args->{size}; actual: 0 ($type); path: $path; error: $lasterr")
     }
 
     if ($args->{size} > -1 && ($args->{size} != $size)) {
         $failed->();
-        Sys::Syslog::syslog('info', 'File Upload Size verification error expected size %d, actual %d, path=%s.',
+        Mgd:log('info', 'File Upload Size verification error expected size %d, actual %d, path=%s.',
                             $args->{size}, $size, $path);
         return $self->err_line("size_mismatch", "Expected: $args->{size}; actual: $size; path: $path")
     }
@@ -458,12 +455,12 @@ sub cmd_create_close {
     # see if we have a fid for this key already
     my $old_fid = MogileFS::FID->new_from_dmid_and_key($dmid, $key);
     if ($old_fid) {
-        Sys::Syslog::syslog('info', 'Found duplicit fids for key=%s, dmid=%d, old_fid=%d, fidid=%d.', $key, $dmid, $old_fid, $fidid);
+        Mgd:log('info', 'Found duplicit fids for key=%s, dmid=%d, old_fid=%d, fidid=%d.', $key, $dmid, $old_fid, $fidid);
         # Fail if a file already exists for this fid.  Should never
         # happen, as it should not be possible to close a file twice.
         return $self->err_line("fid_exists")
             unless $old_fid->{fidid} != $fidid;
-        Sys::Syslog::syslog('info', 'Deleting file.');
+        Mgd:log('info', 'Deleting file.');
         $old_fid->delete;
     }
 
@@ -571,7 +568,7 @@ sub cmd_file_debug {
         $args->{dmid} = $self->check_domain($args)
             or return $self->err_line('domain_not_found');
         return $self->err_line("no_key") unless $args->{key};
-        
+
         # now invoke the plugin, abort if it tells us to
         my $rv = MogileFS::run_global_hook('cmd_file_debug', $args);
         return $self->err_line('plugin_aborted')
@@ -1538,7 +1535,7 @@ sub cmd_fsck_reset {
     my $sto = Mgd::get_store();
     $sto->set_server_setting("fsck_opt_policy_only",
         ($args->{policy_only} ? "1" : undef));
-    $sto->set_server_setting("fsck_highest_fid_checked", 
+    $sto->set_server_setting("fsck_highest_fid_checked",
         ($args->{startpos} ? $args->{startpos} : "0"));
 
     $self->_do_fsck_reset or return $self->err_line;
