@@ -49,7 +49,7 @@ sub work {
             $todo->{arg} = [split /,/, $todo->{arg}];
             my $devfid =
                 MogileFS::DevFID->new($todo->{devid}, $todo->{fid});
-            $self->rebalance_devfid($devfid, 
+            $self->rebalance_devfid($devfid,
                 { target_devids => $todo->{arg} });
 
             # If files error out, we want to send the error up to syslog
@@ -606,7 +606,7 @@ sub http_copy {
                               $rfid, \$shostip, \$sport, \$spath, \$shttphost);
 
     # okay, now get the file
-    my $sock = IO::Socket::INET->new(PeerAddr => $shostip, PeerPort => $sport, Timeout => 2)
+    my $sock = IO::Socket::INET->new(PeerAddr => $shostip, PeerPort => $sport, Timeout => 6)
         or return $src_error->("Unable to create source socket to $shostip:$sport for $spath");
     unless ($shttphost) {
         $sock->write("GET $spath HTTP/1.0\r\n\r\n");
@@ -635,7 +635,7 @@ sub http_copy {
         if defined $expected_clen && $clen != $expected_clen;
 
     # open target for put
-    my $dsock = IO::Socket::INET->new(PeerAddr => $dhostip, PeerPort => $dport, Timeout => 2)
+    my $dsock = IO::Socket::INET->new(PeerAddr => $dhostip, PeerPort => $dport, Timeout => 6)
         or return $dest_error->("Unable to create dest socket to $dhostip:$dport for $dpath");
     $dsock->write("PUT $dpath HTTP/1.0\r\nContent-length: $clen$content_md5\r\n\r\n")
         or return $dest_error->("Unable to write data to $dpath on $dhostip:$dport");
