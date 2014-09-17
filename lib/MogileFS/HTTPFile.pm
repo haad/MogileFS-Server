@@ -98,18 +98,25 @@ sub delete {
 use constant FILE_MISSING => -1;
 sub size {
     my $self = shift;
+    my $repeat = 0;
 
+    START:
     return $self->{_size} if defined $self->{_size};
 
     my ($host, $port, $uri, $path) = map { $self->{$_} } qw(host port uri url);
+    Mgd::log('info', 'host = %s, port = %d, uri = %s, path = %s',$host, $port, $uri, $path);
+    Mgd::log('info', '$size_check_retry_after{$host} = %s', $size_check_retry_after{$host});
 
     return undef if (exists $size_check_retry_after{$host}
         && $size_check_retry_after{$host} > Time::HiRes::time());
 
     my $node_timeout = MogileFS->config("node_timeout");
     # Hardcoded connection cache size of 20 :(
-    $user_agent ||= LWP::UserAgent->new(timeout => $node_timeout, keep_alive => 20);
+    $user_agent ||= LWP::UserAgent->new(timeout => $node_timeout, keep_alive => 50);
     my $res = $user_agent->head($path);
+    Mgd::log('info', 'Mog:: res->code = %s, res->message = %s, res->status_line = %s, res->base = %s', $res->code, $res->message, $res->status_line, $res->base);
+    Mgd::log('info', 'Mog:: res->content = %s', $res->as_string());
+    #print('HTTPFile size $user_agent->head($path), res->code = %d, res->message = %s, res->header = %s', $res->code, $res->message, $res->header);
     if ($res->is_success) {
         delete $size_check_failcount{$host} if exists $size_check_failcount{$host};
         my $size = $res->header('content-length');
@@ -127,6 +134,18 @@ sub size {
             delete $size_check_failcount{$host} if exists $size_check_failcount{$host};
             return FILE_MISSING;
         }
+
+   #
+   # LWP::Net fake socket level errors with error codes 500 let's try to repeat our check it might go through
+   #
+   if ($res->code == 500) {
+       Mgd::log('info', 'Repeating HTTP check after error 500 to url: %s', $path);
+       $repeat = $repeat + 1;
+       if ( $repeat < 4 ) {
+           goto START;
+       }
+   }
+
         if ($res->message =~ m/connect:/) {
             my $count = $size_check_failcount{$host};
             $count ||= 1;
